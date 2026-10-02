@@ -427,6 +427,63 @@ class TestUpdateWorkspace:
         assert state.get("config_fingerprint")
         assert state.get("config_dependency_fingerprints")
 
+    def test_missing_fingerprint_is_stale_under_shared_db(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A repo indexed into a shared DB but whose state.json has no
+        config_fingerprint is stale, even though no repo-local wiki.db
+        exists (regression test for #2897)."""
+        from repowise.core.persistence import (
+            create_engine,
+            create_session_factory,
+            get_session,
+            init_db,
+        )
+        from repowise.core.persistence.crud import upsert_repository
+        from repowise.core.persistence.database import get_db_url
+
+        repo = _make_git_repo(tmp_path, "backend")
+        head = get_head_commit(repo)
+        _write_state(repo, head)
+        assert not (repo / ".repowise" / "wiki.db").exists()
+
+        shared_db = tmp_path / "shared.db"
+        monkeypatch.setenv("REPOWISE_DB_URL", f"sqlite:///{shared_db}")
+
+        async def _seed() -> None:
+            engine = create_engine(get_db_url(f"sqlite:///{shared_db}"))
+            await init_db(engine)
+            sf = create_session_factory(engine)
+            try:
+                async with get_session(sf) as session:
+                    await upsert_repository(
+                        session,
+                        name="backend",
+                        local_path=str(repo),
+                        head_commit=head,
+                    )
+            finally:
+                await engine.dispose()
+
+        ws_config = WorkspaceConfig(
+            repos=[RepoEntry(path="backend", alias="backend", last_commit_at_index=head)]
+        )
+        mock_result = RepoUpdateResult(alias="backend", updated=True, file_count=1)
+
+        async def _run() -> int:
+            await _seed()
+            with patch(
+                "repowise.core.workspace.update.update_single_repo_index",
+                new_callable=AsyncMock,
+                return_value=mock_result,
+            ) as mocked:
+                await update_workspace(tmp_path, ws_config)
+                return mocked.await_count
+
+        import asyncio
+
+        assert asyncio.run(_run()) == 1
+
     def test_repo_filter(self, tmp_path: Path) -> None:
         """--repo flag should only update the specified repo."""
         repo_a = _make_git_repo(tmp_path, "backend")

@@ -874,9 +874,12 @@ async def update_workspace(
             stored_commit,
         )
         stored_config_fp = state.get("config_fingerprint")
-        config_state_missing = (
-            (abs_path / ".repowise" / "wiki.db").is_file()
-            and stored_config_fp is None
+        # "Indexed but never recorded a config fingerprint" must also fire
+        # under a shared database, where no repo-local wiki.db exists.
+        # _has_persisted_repo_index already encodes that split (repo row vs
+        # local file), so reuse it instead of gating on the file directly.
+        config_state_missing = stored_config_fp is None and await _has_persisted_repo_index(
+            abs_path
         )
         if not is_stale and (
             config_state_missing
